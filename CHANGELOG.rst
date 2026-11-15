@@ -56,6 +56,7 @@ Fixes:
 - ``SubtitleCodecContext.decode(None)`` flushes the decoder instead of raising ``RuntimeError``, so delayed decoders such as EIA-608 closed captions return their final subtitle.
 - ``AudioFrame.planes`` no longer counts one plane too many for 8-channel planar audio (e.g. ``fltp`` with ``7.1``), which made ``planes``, ``to_ndarray()``, and ``from_ndarray()`` raise ``ValueError``, and no longer reads past the end of ``extended_data`` for more channels. By :gh-user:`ChandraChaan` in (:pr:`2502`).
 - ``AudioFifo.write()`` now raises ``ValueError`` for a frame whose channel layout differs from the first frame's, instead of reading the wrong number of channels and scrambling or over-reading the samples. By :gh-user:`ChandraChaan` in (:pr:`2505`).
+- ``AudioFifo`` and ``AudioResampler`` emit timestamps that advance strictly by sample count for continuous input, tolerating the per-frame rounding of sources whose ``time_base`` is coarser than the sample rate (e.g. 1/1000 for 44.1khz audio from Matroska), and accept a negative starting pts such as AAC priming samples; ``AudioResampler`` raises ``ValueError`` when a frame's ``time_base`` changes mid-stream instead of rescaling its pts against the stale one.
 - A failed ``CodecContext.open()`` no longer clears the selected codec, so ``codec``, ``name``, ``is_encoder``, and ``is_decoder`` keep working and the context can be reused after fixing the offending parameters.
 
 v19.0.2

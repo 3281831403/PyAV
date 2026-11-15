@@ -87,6 +87,58 @@ class TestAudioFifo(TestCase):
         assert oframe.pts == 2048
         assert fifo.pts_per_sample == 2.0
 
+    def test_pts_coarse_time_base(self) -> None:
+        """
+        Frames from a 44.1khz source with a 1/1000 time base (e.g. Matroska)
+        have individually rounded timestamps; the FIFO must accept them and
+        emit timestamps that advance strictly by sample count.
+        """
+        fifo = av.AudioFifo()
+
+        # 1024 samples at 44.1khz last 23.22ms, so the source rounds each
+        # frame's pts individually.
+        for pts in (0, 23, 46, 70):
+            iframe = av.AudioFrame(samples=1024)
+            iframe.pts = pts
+            iframe.sample_rate = 44100
+            iframe.time_base = Fraction(1, 1000)
+            fifo.write(iframe)
+
+        oframes = fifo.read_many(1024)
+        assert [oframe.pts for oframe in oframes] == [0, 23, 46, 70]
+
+    def test_pts_negative_start(self) -> None:
+        """
+        A negative starting pts (e.g. AAC priming samples) is accepted and
+        preserved.
+        """
+        fifo = av.AudioFifo()
+
+        iframe = av.AudioFrame(samples=1024)
+        iframe.pts = -21
+        iframe.sample_rate = 48000
+        iframe.time_base = Fraction(1, 1000)
+        fifo.write(iframe)
+
+        # 1024 samples at 48khz last 21.33ms.
+        iframe = av.AudioFrame(samples=1024)
+        iframe.pts = 0
+        iframe.sample_rate = 48000
+        iframe.time_base = Fraction(1, 1000)
+        fifo.write(iframe)
+
+        oframe = fifo.read(512)
+        assert oframe is not None
+        assert oframe.pts == -21
+
+        oframe = fifo.read(512)
+        assert oframe is not None
+        assert oframe.pts == -21 + round(512 * 1000 / 48000)
+
+        oframe = fifo.read(1024)
+        assert oframe is not None
+        assert oframe.pts == -21 + round(1024 * 1000 / 48000)
+
     def test_missing_sample_rate(self) -> None:
         fifo = av.AudioFifo()
 

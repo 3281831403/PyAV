@@ -1,6 +1,7 @@
 import cython
 from cython.cimports.av.audio.frame import alloc_audio_frame
 from cython.cimports.av.error import err_check
+from cython.cimports.libc.math import llrint
 
 
 @cython.final
@@ -94,14 +95,27 @@ class AudioFifo:
         # Assert that the PTS are what we expect.
         expected_pts = cython.declare(int64_t)
         if self.pts_per_sample and frame.ptr.pts != lib.AV_NOPTS_VALUE:
-            expected_pts = cython.cast(
-                int64_t, self.pts_per_sample * self.samples_written
-            )
-            if frame.ptr.pts != expected_pts:
-                raise ValueError(
-                    f"Frame.pts ({frame.ptr.pts}) != expected ({expected_pts}); "
-                    "fix or set to None."
+            if not self.has_pts_anchor:
+                # Anchor our timeline on the first frame with a pts. It may not
+                # be the first frame written, and the pts may be negative (e.g.
+                # AAC priming samples).
+                self.pts_anchor = frame.ptr.pts - cython.cast(
+                    int64_t, llrint(self.pts_per_sample * self.samples_written)
                 )
+                self.has_pts_anchor = True
+            else:
+                expected_pts = self.pts_anchor + cython.cast(
+                    int64_t, llrint(self.pts_per_sample * self.samples_written)
+                )
+                # Tolerate a single pts unit of jitter, which is unavoidable
+                # when the time_base is coarser than the sample rate (e.g.
+                # 1/1000 for 44.1khz audio) and the source rounds or truncates
+                # each frame's pts individually.
+                if abs(frame.ptr.pts - expected_pts) > 1:
+                    raise ValueError(
+                        f"Frame.pts ({frame.ptr.pts}) != expected ({expected_pts}); "
+                        "fix or set to None."
+                    )
 
         err_check(
             lib.av_audio_fifo_write(
@@ -162,9 +176,14 @@ class AudioFifo:
         )
 
         if self.pts_per_sample:
-            frame.ptr.pts = cython.cast(
-                uint64_t, self.pts_per_sample * self.samples_read
-            )
+            if self.has_pts_anchor:
+                frame.ptr.pts = self.pts_anchor + cython.cast(
+                    int64_t, llrint(self.pts_per_sample * self.samples_read)
+                )
+            else:
+                frame.ptr.pts = cython.cast(
+                    int64_t, self.pts_per_sample * self.samples_read
+                )
         else:
             frame.ptr.pts = lib.AV_NOPTS_VALUE
 

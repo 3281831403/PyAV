@@ -332,3 +332,85 @@ def test_mismatched_input() -> None:
         ValueError, match="Frame does not match AudioResampler setup."
     ) as cm:
         resampler.resample(iframe)
+
+
+def test_pts_coarse_time_base() -> None:
+    """
+    Output timestamps advance strictly by sample count, even when the input
+    time base is coarser than the sample rate (e.g. 1/1000 for 44.1khz audio
+    from Matroska), so the output can be fed into an AudioFifo.
+    """
+    resampler = AudioResampler("s16", "stereo", 48000, frame_size=512)
+    fifo = av.AudioFifo()
+
+    # 1024 samples at 44.1khz last 23.22ms, so the source rounds each frame's
+    # pts individually.
+    oframes = []
+    for pts in (0, 23, 46, 70):
+        iframe = AudioFrame("s16", "stereo", 1024)
+        iframe.sample_rate = 44100
+        iframe.time_base = Fraction(1, 1000)
+        iframe.pts = pts
+        oframes.extend(resampler.resample(iframe))
+    oframes.extend(resampler.resample(None))
+
+    pts = 0
+    for oframe in oframes:
+        assert oframe.time_base == Fraction(1, 48000)
+        assert oframe.sample_rate == 48000
+        assert oframe.pts == pts
+        pts += oframe.samples
+        fifo.write(oframe)  # must not raise
+
+    assert pts > 4 * 1024  # 4096 input samples were resampled to 48khz.
+
+
+def test_pts_negative_start() -> None:
+    """
+    A negative starting pts (e.g. AAC priming samples) is preserved, and
+    later timestamps advance strictly by sample count from it.
+    """
+    resampler = AudioResampler("s16", "mono", 48000)
+
+    iframe = AudioFrame("s16", "mono", 1024)
+    iframe.sample_rate = 44100
+    iframe.time_base = Fraction(1, 1000)
+    iframe.pts = -21
+
+    oframes = resampler.resample(iframe)
+    assert len(oframes) == 1
+    first_pts = -21 * 48000 // 1000
+    assert oframes[0].pts == first_pts
+    assert oframes[0].time_base == Fraction(1, 48000)
+    samples_so_far = oframes[0].samples
+
+    # 1024 samples at 44.1khz last 23.22ms.
+    iframe = AudioFrame("s16", "mono", 1024)
+    iframe.sample_rate = 44100
+    iframe.time_base = Fraction(1, 1000)
+    iframe.pts = 2
+
+    oframes = resampler.resample(iframe)
+    assert len(oframes) == 1
+    assert oframes[0].pts == first_pts + samples_so_far
+
+
+def test_time_base_change() -> None:
+    """
+    A frame with a different time_base is rejected, rather than having its
+    pts misinterpreted against the stale time base.
+    """
+    resampler = AudioResampler("s16", "mono", 48000)
+
+    iframe = AudioFrame("s16", "mono", 1024)
+    iframe.sample_rate = 44100
+    iframe.time_base = Fraction(1, 1000)
+    iframe.pts = 0
+    resampler.resample(iframe)
+
+    iframe = AudioFrame("s16", "mono", 1024)
+    iframe.sample_rate = 44100
+    iframe.time_base = Fraction(1, 48000)
+    iframe.pts = 48000
+    with pytest.raises(ValueError, match="Frame does not match AudioResampler setup."):
+        resampler.resample(iframe)

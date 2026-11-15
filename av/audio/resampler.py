@@ -1,4 +1,5 @@
 from errno import EAGAIN
+from fractions import Fraction
 
 import cython
 from cython.cimports.av.filter.graph import Graph
@@ -72,6 +73,7 @@ class AudioResampler:
         # Take source settings from the first frame.
         if not self.graph:
             self.template = frame
+            self.input_time_base = frame.time_base
 
             # Set some default descriptors.
             self.format = self.format or frame.format
@@ -132,20 +134,51 @@ class AudioResampler:
                 frame.format.sample_fmt != self.template.format.sample_fmt
                 or frame.layout != self.template.layout
                 or frame.sample_rate != self.template.rate
+                or frame.time_base != self.input_time_base
             ):
                 raise ValueError("Frame does not match AudioResampler setup.")
+
+            # Track the input timeline so that output timestamps can advance
+            # strictly by sample count. Frames from a source with a time_base
+            # coarser than the sample rate (e.g. 1/1000 for 44.1khz audio)
+            # carry individually rounded timestamps, which must not be allowed
+            # to make the output timeline drift.
+            if frame.pts is not None:
+                time_base = frame.time_base or Fraction(1, frame.sample_rate)
+                expected_pts = self.input_pts_anchor
+                if expected_pts is not None:
+                    expected_pts += round(
+                        Fraction(self.input_samples, frame.sample_rate) / time_base
+                    )
+                if expected_pts is None or abs(frame.pts - expected_pts) > 1:
+                    # The first frame with a pts (which may be negative, e.g.
+                    # AAC priming samples), or a real gap in the input: anchor
+                    # both timelines on it.
+                    self.input_pts_anchor = frame.pts - round(
+                        Fraction(self.input_samples, frame.sample_rate) / time_base
+                    )
+                    self.output_pts_anchor = round(
+                        self.input_pts_anchor * time_base * self.rate
+                    )
+
+            self.input_samples += frame.samples
 
         self.graph.push(frame)
 
         output: list[AudioFrame] = []
         while True:
             try:
-                output.append(self.graph.pull())
+                oframe = self.graph.pull()
             except EOFError:
                 break
             except FFmpegError as e:
                 if e.errno != EAGAIN:
                     raise
                 break
+
+            if self.output_pts_anchor is not None:
+                oframe.pts = self.output_pts_anchor + self.output_samples
+            self.output_samples += oframe.samples
+            output.append(oframe)
 
         return output

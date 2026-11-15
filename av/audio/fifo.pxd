@@ -14,6 +14,9 @@ cdef class AudioFifo:
     cdef readonly uint64_t samples_read
     cdef readonly double pts_per_sample
 
+    cdef int64_t pts_anchor
+    cdef bint has_pts_anchor
+
     cpdef write(self, AudioFrame frame)
     cpdef read(self, int samples=*, bint partial=*)
     cpdef read_many(self, int samples, bint partial=*)
