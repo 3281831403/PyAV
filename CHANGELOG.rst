@@ -58,6 +58,7 @@ Fixes:
 - ``AudioFifo.write()`` now raises ``ValueError`` for a frame whose channel layout differs from the first frame's, instead of reading the wrong number of channels and scrambling or over-reading the samples. By :gh-user:`ChandraChaan` in (:pr:`2505`).
 - A failed ``CodecContext.open()`` no longer clears the selected codec, so ``codec``, ``name``, ``is_encoder``, and ``is_decoder`` keep working and the context can be reused after fixing the offending parameters.
 - :class:`.BitStreamFilterContext` now passes ``in_stream``'s time base to the filter, so filters that read it, such as ``setts`` with ``TB`` and ``pcm_rechunk``, no longer return ``None`` timestamps. By :gh-user:`NotAFlightRisk`.
+- Pushing a frame into a graph now rescales its ``pts`` from the frame's own :attr:`.Frame.time_base` into each buffer source's time base, including via ``FilterContext.push()``, so frames from sources with different time bases (e.g. HLS at 1/90000 into an mp4-style 1/24 buffer) keep their wall-clock timing instead of being read as raw ticks. Each buffer source is translated independently, the pushed frame is left untouched, frames with an unset (0/1) time base still pass through as raw ticks, and frames without a ``pts`` are not given one.
 
 v19.0.2
 -------

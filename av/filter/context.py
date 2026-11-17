@@ -102,6 +102,57 @@ class FilterContext:
         err_check(lib.avfilter_link(self.ptr, output_idx, input_.ptr, input_idx))
         self.graph.configured = False
 
+    @cython.cfunc
+    def _push_source_frame(self, frame: Frame) -> cython.void:
+        res: cython.int
+
+        # The buffer source interprets PTS in its output link's time base.
+        # Translate the frame's PTS into that time base so sources with
+        # different time bases (e.g. HLS frames at 1/90000 pushed into a
+        # 1/24 buffer) keep their wall-clock timing.
+        src_tb: lib.AVRational = self.ptr.outputs[0].time_base
+        frame_tb: lib.AVRational = frame._time_base
+
+        # A frame with an unset (0/1) time base is declared in raw ticks;
+        # pass it through untouched, as tests rely on that behaviour.
+        if not frame_tb.num:
+            with cython.nogil:
+                res = lib.av_buffersrc_write_frame(self.ptr, frame.ptr)
+            err_check(res)
+            return
+
+        # Nothing to translate. Push the caller's frame directly.
+        if frame_tb.num == src_tb.num and frame_tb.den == src_tb.den:
+            with cython.nogil:
+                res = lib.av_buffersrc_write_frame(self.ptr, frame.ptr)
+            err_check(res)
+            return
+
+        # Rescale on a private copy so the frame handed in by the caller is
+        # never mutated. Each buffer source does its own translation, so the
+        # same frame can be broadcast into differently-timed sources.
+        push_ptr: cython.pointer[lib.AVFrame] = lib.av_frame_alloc()
+        if not push_ptr:
+            raise MemoryError("Could not allocate AVFrame")
+        try:
+            with cython.nogil:
+                res = lib.av_frame_ref(push_ptr, frame.ptr)
+            err_check(res)
+
+            if push_ptr.pts != lib.AV_NOPTS_VALUE:
+                push_ptr.pts = lib.av_rescale_q(push_ptr.pts, frame_tb, src_tb)
+            if push_ptr.duration != 0:
+                push_ptr.duration = lib.av_rescale_q(
+                    push_ptr.duration, frame_tb, src_tb
+                )
+
+            with cython.nogil:
+                res = lib.av_buffersrc_write_frame(self.ptr, push_ptr)
+            err_check(res)
+        finally:
+            with cython.nogil:
+                lib.av_frame_free(cython.address(push_ptr))
+
     def push(self, frame: Frame | None):
         res: cython.int
 
@@ -116,9 +167,7 @@ class FilterContext:
             err_check(res)
             return
         elif self._kind == _KIND_SOURCE:
-            with cython.nogil:
-                res = lib.av_buffersrc_write_frame(self.ptr, frame.ptr)
-            err_check(res)
+            self._push_source_frame(frame)
             return
 
         # Delegate to the input.

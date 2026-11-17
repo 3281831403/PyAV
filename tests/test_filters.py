@@ -468,3 +468,134 @@ class TestFilters(TestCase):
         frame.pts = 1
         src.push(frame)
         assert sink.pull().pts == 1
+
+    def test_push_rebases_video_pts_to_buffer_time_base(self) -> None:
+        # HLS-style frames (time_base 1/90000) pushed into a buffer declared
+        # with an mp4-style 1/24 time base must keep wall-clock timing: one
+        # second (90000 ticks) becomes 24 ticks, not 3750 seconds.
+        graph = Graph()
+        src = graph.add_buffer(
+            width=16, height=16, format="rgb24", time_base=Fraction(1, 24)
+        )
+        sink = graph.add("buffersink")
+        src.link_to(sink)
+        graph.configure()
+
+        frame = VideoFrame(16, 16, "rgb24")
+        frame.pts = 90000
+        frame.time_base = Fraction(1, 90000)
+
+        # Exercise the direct FilterContext.push route as well as vpush.
+        src.push(frame)
+        out = sink.pull()
+
+        assert isinstance(out, VideoFrame)
+        assert out.time_base == Fraction(1, 24)
+        assert out.pts == 24  # one second in 1/24 units
+        assert out.time == pytest.approx(1.0)
+
+        # The caller's frame must not be modified.
+        assert frame.pts == 90000
+        assert frame.time_base == Fraction(1, 90000)
+
+    def test_push_rebases_audio_pts_to_buffer_time_base(self) -> None:
+        # A frame stamped in 1/44100 must not be read as raw ticks by a
+        # 1/48000 abuffer: 44100 ticks is one second, i.e. 48000 output ticks.
+        graph = Graph()
+        abuffer = graph.add_abuffer(
+            format="s16",
+            sample_rate=48000,
+            layout="stereo",
+            time_base=Fraction(1, 48000),
+        )
+        sink = graph.add("abuffersink")
+        abuffer.link_to(sink)
+        graph.configure()
+
+        frame = AudioFrame(format="s16", layout="stereo", samples=1024)
+        frame.sample_rate = 48000
+        frame.time_base = Fraction(1, 44100)
+        frame.pts = 44100
+
+        graph.push(frame)
+        out = graph.pull()
+
+        assert isinstance(out, AudioFrame)
+        assert out.time_base == Fraction(1, 48000)
+        assert out.pts == 48000
+        assert frame.pts == 44100
+        assert frame.time_base == Fraction(1, 44100)
+
+    def test_push_broadcast_rebases_per_buffer(self) -> None:
+        # The same frame broadcast into buffers with different time bases must
+        # be translated independently instead of delivering identical ticks.
+        width, height = 16, 16
+        graph = Graph()
+        src_24 = graph.add_buffer(
+            width=width, height=height, format="rgb24", time_base=Fraction(1, 24)
+        )
+        src_30 = graph.add_buffer(
+            width=width, height=height, format="rgb24", time_base=Fraction(1, 30)
+        )
+        sink_24 = graph.add("buffersink")
+        sink_30 = graph.add("buffersink")
+        src_24.link_to(sink_24)
+        src_30.link_to(sink_30)
+        graph.configure()
+
+        frame = VideoFrame(width, height, "rgb24")
+        frame.pts = 90000  # exactly one second at 1/90000
+        frame.time_base = Fraction(1, 90000)
+
+        graph.vpush(frame)
+
+        out_24 = sink_24.pull()
+        out_30 = sink_30.pull()
+        assert out_24.pts == 24
+        assert out_24.time_base == Fraction(1, 24)
+        assert out_30.pts == 30
+        assert out_30.time_base == Fraction(1, 30)
+
+        assert frame.pts == 90000
+        assert frame.time_base == Fraction(1, 90000)
+
+    def test_push_passes_through_zero_time_base(self) -> None:
+        # Frames whose time_base is unset (0/1) carry raw ticks and must be
+        # handed to the buffer source without rescaling.
+        graph = Graph()
+        src = graph.add_buffer(
+            width=16, height=16, format="rgb24", time_base=Fraction(1, 24)
+        )
+        sink = graph.add("buffersink")
+        src.link_to(sink)
+        graph.configure()
+
+        frame = VideoFrame(16, 16, "rgb24")
+        assert frame.time_base == AVRational(0, 1)
+        frame.pts = 42
+
+        src.push(frame)
+        out = sink.pull()
+        assert out.pts == 42
+        assert out.time_base == Fraction(1, 24)
+        assert frame.pts == 42
+        assert frame.time_base == AVRational(0, 1)
+
+    def test_push_without_pts_stays_without_pts(self) -> None:
+        # A missing PTS must not be invented while rebasing into the buffer.
+        graph = Graph()
+        src = graph.add_buffer(
+            width=16, height=16, format="rgb24", time_base=Fraction(1, 24)
+        )
+        sink = graph.add("buffersink")
+        src.link_to(sink)
+        graph.configure()
+
+        frame = VideoFrame(16, 16, "rgb24")
+        frame.pts = None
+        frame.time_base = Fraction(1, 90000)
+
+        src.push(frame)
+        out = sink.pull()
+        assert out.pts is None
+        assert frame.pts is None
